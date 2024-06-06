@@ -21,6 +21,29 @@ apc rd offset : rd = pc + offset
 
 */
 
+string fibocode = @"
+    j main
+fibo:
+    push ra s1 s2   ; save context
+    b< s0 2 ret     ; if x < 2 return 2
+    mv s2 s0        ; s2 = x
+    cal- s0 s2 1    ; fibo(x-1)
+    apc ra 2        ; set return address
+    j fibo          ; call fibo
+    mv s1 s0        ; t = fibo(x-1)
+    cal- s0 s2 2    ; fibo(x-2)
+    apc ra 2        ; set return address
+    j fibo          ; call fibo
+    cal+ s0 s0 s1   ; return fibo(x-1) + fibo(x-2)
+ret:
+    pop ra s1 s2    ; restore context
+    j ra ; return
+main:
+    mv s0 20        ; set x, use s0 as arg and result
+    apc ra 2
+    j fibo          ; call fibo fibo(20) should is 6765
+";
+
 string testcode = @"
     ; here sp is default set to 255
     mv s3 100000000
@@ -41,7 +64,7 @@ loop:
 
 Stopwatch sw = Stopwatch.StartNew();
 
-MyProgram myProgram = new(testcode);
+MyProgram myProgram = new(fibocode);
 myProgram.Run();
 sw.Stop();
 Console.WriteLine("res: " + myProgram.GetResult((int)AsmParser.RegId.s0));
@@ -73,7 +96,7 @@ partial class AsmParser
 {
     public enum RegId { ra, sp, s0, s1, s2, s3, s4, s5 };
 
-    readonly static Dictionary<string, int> Regid = new(){
+    readonly static Dictionary<string, int> regidmap = new(){
         // x0-x7   :  alias
         {"x0" , 0 }, {"ra", 0},
         {"x1" , 1 }, {"sp", 1},
@@ -118,7 +141,7 @@ partial class AsmParser
         {">=" , (rs1, rs2, target) => new AsmInstBgte(rs1, rs2, target)},
     };
 
-    // label point to the previous instruction
+    // label point to the next instruction
     Dictionary<string, int> labelTable = [];
     static IOpParam ParseOpParam(in string token)
     {
@@ -138,7 +161,7 @@ partial class AsmParser
             IOpParam addrOp = ParseOpParam(addr);
             return new MemOpParam(addrOp);
         }
-        if (Regid.TryGetValue(token, out int value)) // regop
+        if (regidmap.TryGetValue(token, out int value)) // regop
         {
             int regid = value;
             return new RegOpParam(regid);
@@ -159,7 +182,7 @@ partial class AsmParser
 
     void ScanLable(in string[] program)
     {
-        int numInsts = -1;
+        int numInsts = 0;
         for (int i = 0; i < program.Length; i++)
         {
             if (program[i].EndsWith(':'))
@@ -202,6 +225,12 @@ partial class AsmParser
         else if (name.StartsWith('j'))
         {
             if (token.Length != 2) throw new Exception("Invalid jump instruction");
+            if (regidmap.ContainsKey(token[1]))
+            {
+                // indirect jump
+                return new AsmInstJr(ParseOpParam(token[1]));
+            }
+            // direct jump
             if (!labelTable.TryGetValue(token[1], out int target)) throw new Exception("Undefined label:" + token[1]);
             return new AsmInstJ(target);
         }
@@ -392,7 +421,8 @@ class AsmInstPush(List<IOpParam> rslist) : IAsmInst
     readonly IOpParam[] rslist = [.. rslist];
     public void Execute(in RunTimeContext context)
     {
-        for(int i=0;i<rslist.Length;i++) {
+        for (int i = 0; i < rslist.Length; i++)
+        {
             RegVal SP = context.rf[(RegVal)AsmParser.RegId.sp];
             context.ram[SP] = rslist[i].Get(context);
             context.rf[(RegVal)AsmParser.RegId.sp]--; // stack pointer decrement
@@ -405,7 +435,8 @@ class AsmInstPop(List<IOpParam> rslist) : IAsmInst
     readonly IOpParam[] rslist = [.. rslist];//NOTE: must be reverse
     public void Execute(in RunTimeContext context)
     {
-        for(int i=0;i<rslist.Length;i++) {
+        for (int i = 0; i < rslist.Length; i++)
+        {
             context.rf[(RegVal)AsmParser.RegId.sp]++;
             RegVal SP = context.rf[(RegVal)AsmParser.RegId.sp];
             rslist[i].Set(context, context.ram[SP]);
@@ -427,38 +458,44 @@ class AsmInstBr(in IOpParam rs1, in IOpParam rs2, int target)
 
 class AsmInstBeq(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
 {
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) == rs2.Get(context)) { context.pc = target; } }
+    public void Execute(in RunTimeContext context) { if (rs1.Get(context) == rs2.Get(context)) context.pc = target - 1; }
 }
 
 class AsmInstBne(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
 {
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) != rs2.Get(context)) { context.pc = target; } }
+    public void Execute(in RunTimeContext context) { if (rs1.Get(context) != rs2.Get(context)) context.pc = target - 1; }
 }
 
 class AsmInstBlt(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
 {
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) < rs2.Get(context)) { context.pc = target; } }
+    public void Execute(in RunTimeContext context) { if (rs1.Get(context) < rs2.Get(context)) context.pc = target - 1; }
 }
 
 class AsmInstBgt(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
 {
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) > rs2.Get(context)) { context.pc = target; } }
+    public void Execute(in RunTimeContext context) { if (rs1.Get(context) > rs2.Get(context)) context.pc = target - 1; }
 }
 
 class AsmInstBlte(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
 {
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) <= rs2.Get(context)) { context.pc = target; } }
+    public void Execute(in RunTimeContext context) { if (rs1.Get(context) <= rs2.Get(context)) context.pc = target - 1; }
 }
 
 class AsmInstBgte(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
 {
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) >= rs2.Get(context)) { context.pc = target; } }
+    public void Execute(in RunTimeContext context) { if (rs1.Get(context) >= rs2.Get(context)) context.pc = target - 1; }
 }
 
 class AsmInstJ(int target) : IAsmInst
 {
     int target = target;
-    public void Execute(in RunTimeContext context) => context.pc = target;
+    public void Execute(in RunTimeContext context) => context.pc = target - 1;
+}
+
+class AsmInstJr(IOpParam rs1) : IAsmInst
+{
+    readonly IOpParam rs1 = rs1;
+    public void Execute(in RunTimeContext context) => context.pc = rs1.Get(context) - 1;
 }
 
 class AsmInstApc(IOpParam rd, IOpParam offset) : IAsmInst
