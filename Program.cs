@@ -1,5 +1,7 @@
 ﻿using System.Text.RegularExpressions;
 using System.Diagnostics;
+using System.Collections.Generic;
+using System;
 
 using RegVal = int;
 using System.Runtime.CompilerServices;
@@ -42,7 +44,7 @@ ret:
     pop ra s1 s2    ; restore context
     j ra ; return
 main:
-    mv s0 20        ; set x, use s0 as arg and result
+    mv s0 35        ; set x, use s0 as arg and result
     apc ra 2
     j fibo          ; call fibo fibo(20) should is 6765
 ";
@@ -90,6 +92,66 @@ class MyProgram
     }
 
     public int GetResult(int regid) => context.rf[regid];
+}
+
+class RunTimeContext
+{
+    const int MaxInsts = 128;
+    int numInsts = 0;
+    readonly IAsmInst[] rom;
+    public RegVal pc = 0;
+    public RegVal[] rf;
+    public RegVal[] ram;
+    public bool finished = false;
+
+    public RunTimeContext()
+    {
+        rom = new IAsmInst[MaxInsts + 20];
+        rf = new RegVal[16];
+        ram = new RegVal[256];
+        rf[(RegVal)AsmParser.RegId.sp] = ram.Length - 1;
+    }
+
+    public void Steps10()
+    {
+        rom[pc].Execute(this); ++pc;
+        rom[pc].Execute(this); ++pc;
+        rom[pc].Execute(this); ++pc;
+        rom[pc].Execute(this); ++pc;
+        rom[pc].Execute(this); ++pc;
+        rom[pc].Execute(this); ++pc;
+        rom[pc].Execute(this); ++pc;
+        rom[pc].Execute(this); ++pc;
+        rom[pc].Execute(this); ++pc;
+        rom[pc].Execute(this); ++pc;
+    }
+
+    public void Run()
+    {
+        do
+        {
+            Steps10();
+        }
+        while (!finished);
+    }
+
+    public void PushInst(IAsmInst inst)
+    {
+        if (numInsts >= MaxInsts) throw new Exception("Too many instructions");
+        rom[numInsts] = inst;
+        numInsts++;
+    }
+
+    public void PlaceHolder()
+    {
+        rom[numInsts] = new AsmInstEnd();
+        numInsts++;
+        for (int i = 0; i < 20; i++)
+        {
+            rom[numInsts] = new AsmInstNop();
+            numInsts++;
+        }
+    }
 }
 
 class AsmParser
@@ -280,10 +342,7 @@ class AsmParser
                 if (label.Contains(' ')) throw new Exception("Invalid label:" + label);
                 labelTable[label] = numInsts;
             }
-            else
-            {
-                numInsts++;
-            }
+            else numInsts++;
         }
     }
 
@@ -299,64 +358,6 @@ class AsmParser
             context.PushInst(inst);
         }
         context.PlaceHolder();
-    }
-}
-
-class RunTimeContext
-{
-    const int MaxInsts = 128;
-    int numInsts = 0;
-    readonly IAsmInst[] rom;
-
-    public RegVal pc = 0;
-    public RegVal[] rf;
-    public RegVal[] ram;
-
-    public bool finished = false;
-
-    public RunTimeContext()
-    {
-        rom = new IAsmInst[MaxInsts + 20];
-        rf = new RegVal[16];
-        ram = new RegVal[256];
-        rf[(RegVal)AsmParser.RegId.sp] = ram.Length - 1;
-    }
-
-    public void Steps10()
-    {
-        rom[pc].Execute(this); pc++;
-        rom[pc].Execute(this); pc++;
-        rom[pc].Execute(this); pc++;
-        rom[pc].Execute(this); pc++;
-        rom[pc].Execute(this); pc++;
-        rom[pc].Execute(this); pc++;
-        rom[pc].Execute(this); pc++;
-        rom[pc].Execute(this); pc++;
-        rom[pc].Execute(this); pc++;
-        rom[pc].Execute(this); pc++;
-    }
-
-    public void Run()
-    {
-        while (!finished) Steps10();
-    }
-
-    public void PushInst(IAsmInst inst)
-    {
-        if (numInsts >= MaxInsts) throw new Exception("Too many instructions");
-        rom[numInsts] = inst;
-        numInsts++;
-    }
-
-    public void PlaceHolder()
-    {
-        rom[numInsts] = new AsmInstEnd();
-        numInsts++;
-        for (int i = 0; i < 10; i++)
-        {
-            rom[numInsts] = new AsmInstNop();
-            numInsts++;
-        }
     }
 }
 
@@ -395,8 +396,12 @@ class MemOpParam(IOpParam aop) : IOpParam
         if (addr < context.ram.Length) context.ram[addr] = value;
         throw new Exception("Invalid memory write: " + (int)addr);
     }
-
 }
+
+// class IOOpParam(int ioidx) : IOpParam
+// {
+
+// }
 
 interface IAsmInst
 {
@@ -618,6 +623,11 @@ class AsmInstBltOptRI(int rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1id
 class AsmInstBgteOptRI(int rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
 {
     public void Execute(in RunTimeContext context) { if (context.rf[rs1idx] >= imm) context.pc = target; }
+}
+
+class AsmInstIn(in IOpParam dst, in IOpParam io, in IOpParam offset)
+{
+    protected readonly IOpParam dst = dst, io = io, offset = offset;
 }
 
 class AsmInstNop : IAsmInst { public void Execute(in RunTimeContext context) { } }
