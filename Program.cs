@@ -2,6 +2,8 @@
 using System.Diagnostics;
 
 using RegVal = int;
+using System.Runtime.CompilerServices;
+
 /*
 
 ops:
@@ -10,14 +12,15 @@ regid: x0-x7 or ra,sp,s0-s5
 mem: [imm] or [regid] or [[[..]]]
 
 instructions:
-
-cal[op] rd rs1 rs2 : rd = rs1 op rs2
-mv rd rs1 : rd = rs1
-push rs1 rs2 ... rsn : push rs1, rs2, ..., rsn to stack, sp -= n, rsn is on stack head
-pop rd1 rd2 ... rdn : from stack pop to rdn, ..., rd2, rd1, sp +=n
-b[op] rs1 rs2 lable : if rs1 op rs2 then jump lable
-j lable : jump lable
-apc rd offset : rd = pc + offset
+c[op] dst src1 src2     : dst = src1 op src2
+mv dst src1             : dst = src1
+push src1 src2 ... srcn : push src1, src2, ..., srcn to stack, sp -= n, srcn is on stack head
+pop dst1 dst2 ... dstn  : from stack pop to dstn, ..., dst2, dst1, sp +=n
+b[op] src1 src2 lable   : if src1 op src2 then jump lable
+j lable                 : jump lable
+apc dst offset          : dst = pc + offset
+in dst io shift         : dst = dst | (io << shift)
+out io src1 shift       : out = (src1 >> shift) & iomask (iomask maybe 0x0f or 0x01)
 
 */
 
@@ -27,14 +30,14 @@ fibo:
     push ra s1 s2   ; save context
     b< s0 2 ret     ; if x < 2 return 2
     mv s2 s0        ; s2 = x
-    cal- s0 s2 1    ; fibo(x-1)
+    c- s0 s2 1      ; fibo(x-1)
     apc ra 2        ; set return address
     j fibo          ; call fibo
     mv s1 s0        ; t = fibo(x-1)
-    cal- s0 s2 2    ; fibo(x-2)
+    c- s0 s2 2      ; fibo(x-2)
     apc ra 2        ; set return address
     j fibo          ; call fibo
-    cal+ s0 s0 s1   ; return fibo(x-1) + fibo(x-2)
+    c+ s0 s0 s1     ; return fibo(x-1) + fibo(x-2)
 ret:
     pop ra s1 s2    ; restore context
     j ra ; return
@@ -57,20 +60,17 @@ loop:
     mv s1 0 
     mv s2 0
     pop s0 s1 s2
-    cal+ s4 s4 1
+    c+ s4 s4 1
     b< s4 s3 loop
     apc s0 0
 ";
 
+MyProgram myProgram = new(testcode);
 Stopwatch sw = Stopwatch.StartNew();
-
-MyProgram myProgram = new(fibocode);
 myProgram.Run();
 sw.Stop();
 Console.WriteLine("res: " + myProgram.GetResult((int)AsmParser.RegId.s0));
 Console.WriteLine("time: " + sw.Elapsed.TotalMilliseconds + "ms");
-
-
 
 class MyProgram
 {
@@ -86,13 +86,13 @@ class MyProgram
 
     public void Run()
     {
-        while (!context.finished) context.Step();
+        context.Run();
     }
 
     public int GetResult(int regid) => context.rf[regid];
 }
 
-partial class AsmParser
+class AsmParser
 {
     public enum RegId { ra, sp, s0, s1, s2, s3, s4, s5 };
 
@@ -108,121 +108,98 @@ partial class AsmParser
         {"x7" , 7 }, {"s5", 7},
     };
 
-    [GeneratedRegex(@"^(0x)?([0-9]+)")]
-    private static partial Regex ImmPattern();
-    [GeneratedRegex(@"^\[(.*)\]")]
-    private static partial Regex MemPattern();
+    readonly static Regex regexImm = new(@"^(0x)?(-?[0-9]+)");
+    readonly static Regex regexMem = new(@"^\[(.*)\]");
 
-    readonly static Regex regexImm = ImmPattern();
-    readonly static Regex regexMem = MemPattern();
+    #region
     readonly static Dictionary<string, ALUInstFactory> alInst = new(){
-        {"+" , (rd, rs1, rs2) => new AsmInstAdd(rd, rs1, rs2)},
-        {"-", (rd, rs1, rs2) => new AsmInstSub(rd, rs1, rs2)},
-        {"&", (rd, rs1, rs2) => new AsmInstAnd(rd, rs1, rs2)},
-        {"|", (rd, rs1, rs2) => new AsmInstOr(rd, rs1, rs2)},
-        {"^", (rd, rs1, rs2) => new AsmInstXor(rd, rs1, rs2)},
-        {"<<", (rd, rs1, rs2) => new AsmInstSll(rd, rs1, rs2)},
-        {">>>", (rd, rs1, rs2) => new AsmInstSrl(rd, rs1, rs2)},
-        {">>", (rd, rs1, rs2) => new AsmInstSra(rd, rs1, rs2)},
-        {"==", (rd, rs1, rs2) => new AsmInstEq(rd, rs1, rs2)},
-        {"!=", (rd, rs1, rs2) => new AsmInstNe(rd, rs1, rs2)},
-        {"<", (rd, rs1, rs2) => new AsmInstLt(rd, rs1, rs2)},
-        {">", (rd, rs1, rs2) => new AsmInstGt(rd, rs1, rs2)},
-        {"<=", (rd, rs1, rs2) => new AsmInstLte(rd, rs1, rs2)},
-        {">=", (rd, rs1, rs2) => new AsmInstGte(rd, rs1, rs2)},
-
+        {"+" , (dst, src1, src2) => (dst, src1, src2) switch
+        {
+            (RegOpParam p1, RegOpParam p2, ImmOpParam p3) => new AsmInstAddOptRRI(p1.regid, p2.regid, p3.imm),
+            (RegOpParam p1, ImmOpParam p3, RegOpParam p2) => new AsmInstAddOptRRI(p1.regid, p2.regid, p3.imm),
+            _ => new AsmInstAdd(dst, src1, src2)
+        }},
+        {"-", (dst, src1, src2) => new AsmInstSub(dst, src1, src2)},
+        {"&", (dst, src1, src2) => new AsmInstAnd(dst, src1, src2)},
+        {"|", (dst, src1, src2) => new AsmInstOr(dst, src1, src2)},
+        {"^", (dst, src1, src2) => new AsmInstXor(dst, src1, src2)},
+        {"<<", (dst, src1, src2) => new AsmInstSll(dst, src1, src2)},
+        {">>>", (dst, src1, src2) => new AsmInstSrl(dst, src1, src2)},
+        {">>", (dst, src1, src2) => new AsmInstSra(dst, src1, src2)},
+        {"==", (dst, src1, src2) => new AsmInstEq(dst, src1, src2)},
+        {"!=", (dst, src1, src2) => new AsmInstNe(dst, src1, src2)},
+        {"<", (dst, src1, src2) => new AsmInstLt(dst, src1, src2)},
+        {">=", (dst, src1, src2) => new AsmInstGte(dst, src1, src2)},
+        {">", (dst, src1, src2) => new AsmInstLt(dst, src2, src1)},
+        {"<=", (dst, src1, src2) => new AsmInstGte(dst, src2, src1)},
     };
     readonly static Dictionary<string, BRUInstFactory> brInst = new(){
-        {"==" , (rs1, rs2, target) => new AsmInstBeq(rs1, rs2, target)},
-        {"!=" , (rs1, rs2, target) => new AsmInstBne(rs1, rs2, target)},
-        {"<" , (rs1, rs2, target) => new AsmInstBlt(rs1, rs2, target)},
-        {">" , (rs1, rs2, target) => new AsmInstBgt(rs1, rs2, target)},
-        {"<=" , (rs1, rs2, target) => new AsmInstBlte(rs1, rs2, target)},
-        {">=" , (rs1, rs2, target) => new AsmInstBgte(rs1, rs2, target)},
+        {"==" , (src1, src2, target) => new AsmInstBeq(src1, src2, target)},
+        {"!=" , (src1, src2, target) => new AsmInstBne(src1, src2, target)},
+        {"<" , (src1, src2, target) => new AsmInstBlt(src1, src2, target)},
+        {">=" , (src1, src2, target) => new AsmInstBgte(src1, src2, target)},
+        {">" , (src1, src2, target) => new AsmInstBlt(src2, src1, target)},
+        {"<=" , (src1, src2, target) => new AsmInstBgte(src2, src1, target)},
+    };
+    readonly static Dictionary<string, BRUInstFactory> brInstOptRR = new(){
+        {"==" , (src1, src2, target) => new AsmInstBeqOptRR(((RegOpParam)src1).regid, ((RegOpParam)src2).regid, target)},
+        {"!=" , (src1, src2, target) => new AsmInstBneOptRR(((RegOpParam)src1).regid, ((RegOpParam)src2).regid, target)},
+        {"<" , (src1, src2, target) => new AsmInstBltOptRR(((RegOpParam)src1).regid, ((RegOpParam)src2).regid, target)},
+        {">=" , (src1, src2, target) => new AsmInstBgteOptRR(((RegOpParam)src1).regid, ((RegOpParam)src2).regid, target)},
+        {">" , (src1, src2, target) => new AsmInstBltOptRR(((RegOpParam)src2).regid, ((RegOpParam)src1).regid, target)},
+        {"<=" , (src1, src2, target) => new AsmInstBgteOptRR(((RegOpParam)src2).regid, ((RegOpParam)src1).regid, target)},
+    };
+    readonly static Dictionary<string, BRUInstFactory> brInstOptRI = new(){
+        {"==" , (src1, src2, target) => new AsmInstBeqOptRI(((RegOpParam)src1).regid, ((ImmOpParam)src2).imm, target)},
+        {"!=" , (src1, src2, target) => new AsmInstBneOptRI(((RegOpParam)src1).regid, ((ImmOpParam)src2).imm, target)},
+        {"<" , (src1, src2, target) => new AsmInstBltOptRI(((RegOpParam)src1).regid, ((ImmOpParam)src2).imm, target)},
+        {">=" , (src1, src2, target) => new AsmInstBgteOptRI(((RegOpParam)src1).regid, ((ImmOpParam)src2).imm, target)},
+        {">" , (src1, src2, target) => new AsmInstBltOptRI(((RegOpParam)src2).regid, ((ImmOpParam)src1).imm, target)},
+        {"<=" , (src1, src2, target) => new AsmInstBgteOptRI(((RegOpParam)src2).regid, ((ImmOpParam)src1).imm, target)},
     };
 
+    #endregion
+
     // label point to the next instruction
-    Dictionary<string, int> labelTable = [];
-    static IOpParam ParseOpParam(in string token)
-    {
-        MatchCollection match;
-        match = regexImm.Matches(token);
-        if (match.Count > 0) // imm op
-        {
-            int imm = 0;
-            if (match[0].Groups[1].Value == "0x") imm = int.Parse(match[0].Groups[2].Value, System.Globalization.NumberStyles.HexNumber);
-            else imm = int.Parse(match[0].Groups[0].Value);
-            return new ImmOpParam(imm);
-        }
-        match = regexMem.Matches(token);
-        if (match.Count > 0) // mem op
-        {
-            string addr = match[0].Groups[1].Value;
-            IOpParam addrOp = ParseOpParam(addr);
-            return new MemOpParam(addrOp);
-        }
-        if (regidmap.TryGetValue(token, out int value)) // regop
-        {
-            int regid = value;
-            return new RegOpParam(regid);
-        }
-        throw new Exception("Invalid operand:" + token);
-    }
-
-    static void RemoveComments(ref string[] program)
-    {
-        List<string> before = [];
-        for (int i = 0; i < program.Length; i++)
-        {
-            string t = program[i].Split(";")[0].Trim().ToLower();
-            if (!string.IsNullOrEmpty(t)) before.Add(t);
-        }
-        program = [.. before];
-    }
-
-    void ScanLable(in string[] program)
-    {
-        int numInsts = 0;
-        for (int i = 0; i < program.Length; i++)
-        {
-            if (program[i].EndsWith(':'))
-            {
-                string label = program[i][..^1];
-                if (label.Contains(' ')) throw new Exception("Invalid label:" + label);
-                labelTable[label] = numInsts;
-            }
-            else
-            {
-                numInsts++;
-            }
-        }
-    }
+    readonly Dictionary<string, int> labelTable = [];
 
     IAsmInst ParseInst(in string inst)
     {
         string[] token = inst.Split(" ");
         string name = token[0];
-        if (name.StartsWith("mv"))
-        {
-            if (token.Length != 3) throw new Exception("Invalid mv instruction");
-            return new AsmInstMv(ParseOpParam(token[1]), ParseOpParam(token[2]));
-        }
-        else if (name.StartsWith("cal"))
+        if (name.StartsWith("c"))
         {
             if (token.Length != 4) throw new Exception("Invalid cal instruction");
-            string op = name[3..];
+            string op = name.Substring(1);
             if (!alInst.TryGetValue(op, out ALUInstFactory? factory)) throw new Exception("Invalid ALU operation:" + op);
             return factory(ParseOpParam(token[1]), ParseOpParam(token[2]), ParseOpParam(token[3]));
         }
-        else if (name.StartsWith('b'))
+        else if (name.StartsWith("mv"))
+        {
+            if (token.Length != 3) throw new Exception("Invalid mv instruction");
+            IOpParam dst = ParseOpParam(token[1]), src1 = ParseOpParam(token[2]);
+            return (dst, src1) switch
+            {
+                (RegOpParam p1, ImmOpParam p2) => new AsmInstMvOptRI(p1.regid, p2.imm),
+                _ => new AsmInstMv(dst, src1)
+            };
+        }
+        else if (name.StartsWith("b"))
         {
             if (token.Length != 4) throw new Exception("Invalid branch instruction");
-            string op = name[1..];
+            string op = name.Substring(1);
             if (!brInst.TryGetValue(op, out BRUInstFactory? factory)) throw new Exception("Invalid BRU operation:" + op);
             if (!labelTable.TryGetValue(token[3], out int target)) throw new Exception("Undefined label:" + token[3]);
-            return factory(ParseOpParam(token[1]), ParseOpParam(token[2]), target);
+            IOpParam src1 = ParseOpParam(token[1]), src2 = ParseOpParam(token[2]);
+            return (src1, src2) switch
+            {
+                (RegOpParam p1, RegOpParam p2) => brInstOptRR[op](p1, p2, target),
+                (RegOpParam p1, ImmOpParam p2) => brInstOptRI[op](p1, p2, target),
+                (ImmOpParam p1, RegOpParam p2) => brInstOptRI[op](p2, p1, target),
+                _ => factory(src1, src2, target)
+            };
         }
-        else if (name.StartsWith('j'))
+        else if (name.StartsWith("j"))
         {
             if (token.Length != 2) throw new Exception("Invalid jump instruction");
             if (regidmap.ContainsKey(token[1]))
@@ -255,6 +232,61 @@ partial class AsmParser
         throw new Exception("Invalid instruction:" + inst);
     }
 
+    static IOpParam ParseOpParam(in string token)
+    {
+        MatchCollection match;
+        match = regexImm.Matches(token);
+        if (match.Count > 0) // imm op
+        {
+            int imm = 0;
+            if (match[0].Groups[1].Value == "0x") imm = int.Parse(match[0].Groups[2].Value, System.Globalization.NumberStyles.HexNumber);
+            else imm = int.Parse(match[0].Groups[0].Value);
+            return new ImmOpParam(imm);
+        }
+        match = regexMem.Matches(token);
+        if (match.Count > 0) // mem op
+        {
+            string addr = match[0].Groups[1].Value;
+            IOpParam addrOp = ParseOpParam(addr);
+            return new MemOpParam(addrOp);
+        }
+        if (regidmap.TryGetValue(token, out int value)) // regop
+        {
+            int regid = value;
+            return new RegOpParam(regid);
+        }
+        throw new Exception("Invalid operand:" + token);
+    }
+
+    static void RemoveComments(ref string[] program)
+    {
+        List<string> before = [];
+        for (int i = 0; i < program.Length; i++)
+        {
+            string t = program[i].Split(";")[0].Trim();
+            if (!string.IsNullOrEmpty(t)) before.Add(t);
+        }
+        program = [.. before];
+    }
+
+    void ScanLable(in string[] program)
+    {
+        int numInsts = 0;
+        for (int i = 0; i < program.Length; i++)
+        {
+            if (program[i].EndsWith(':'))
+            {
+                string label = program[i][..^1];
+                if (label.Contains(' ')) throw new Exception("Invalid label:" + label);
+                labelTable[label] = numInsts;
+            }
+            else
+            {
+                numInsts++;
+            }
+        }
+    }
+
     public void ParseProgram(in RunTimeContext context, in string program)
     {
         string[] lines = program.Split("\n");
@@ -263,10 +295,10 @@ partial class AsmParser
         foreach (string line in lines)
         {
             if (line.Length == 0 || line.EndsWith(':')) continue;
-            IAsmInst inst = ParseInst(line);
+            IAsmInst inst = ParseInst(line.ToLower());
             context.PushInst(inst);
         }
-        context.PushInst(new AsmInstEnd());
+        context.PlaceHolder();
     }
 }
 
@@ -274,7 +306,7 @@ class RunTimeContext
 {
     const int MaxInsts = 128;
     int numInsts = 0;
-    IAsmInst[] rom;
+    readonly IAsmInst[] rom;
 
     public RegVal pc = 0;
     public RegVal[] rf;
@@ -284,21 +316,29 @@ class RunTimeContext
 
     public RunTimeContext()
     {
-        rom = new IAsmInst[MaxInsts + 1];
+        rom = new IAsmInst[MaxInsts + 20];
         rf = new RegVal[16];
         ram = new RegVal[256];
         rf[(RegVal)AsmParser.RegId.sp] = ram.Length - 1;
     }
 
-    public void Step()
+    public void Steps10()
     {
-        rom[pc].Execute(this);
-        pc++;
+        rom[pc].Execute(this); pc++;
+        rom[pc].Execute(this); pc++;
+        rom[pc].Execute(this); pc++;
+        rom[pc].Execute(this); pc++;
+        rom[pc].Execute(this); pc++;
+        rom[pc].Execute(this); pc++;
+        rom[pc].Execute(this); pc++;
+        rom[pc].Execute(this); pc++;
+        rom[pc].Execute(this); pc++;
+        rom[pc].Execute(this); pc++;
     }
 
-    public void Steps(int n)
+    public void Run()
     {
-        for (int i = 0; i < n && !finished; i++) Step();
+        while (!finished) Steps10();
     }
 
     public void PushInst(IAsmInst inst)
@@ -306,6 +346,17 @@ class RunTimeContext
         if (numInsts >= MaxInsts) throw new Exception("Too many instructions");
         rom[numInsts] = inst;
         numInsts++;
+    }
+
+    public void PlaceHolder()
+    {
+        rom[numInsts] = new AsmInstEnd();
+        numInsts++;
+        for (int i = 0; i < 10; i++)
+        {
+            rom[numInsts] = new AsmInstNop();
+            numInsts++;
+        }
     }
 }
 
@@ -317,23 +368,34 @@ interface IOpParam
 
 class RegOpParam(int regid) : IOpParam
 {
-    readonly int regid = regid;
+    public readonly int regid = regid;
     public RegVal Get(in RunTimeContext context) => context.rf[regid];
     public void Set(in RunTimeContext context, RegVal value) => context.rf[regid] = value;
 }
 
 class ImmOpParam(RegVal imm) : IOpParam
 {
-    readonly RegVal imm = imm;
+    public readonly RegVal imm = imm;
     public RegVal Get(in RunTimeContext context) => imm;
     public void Set(in RunTimeContext context, RegVal value) { throw new Exception("Cannot set value of immediate operand"); }
 }
 
-class MemOpParam(IOpParam addr) : IOpParam
+class MemOpParam(IOpParam aop) : IOpParam
 {
-    readonly IOpParam addr = addr;
-    public RegVal Get(in RunTimeContext context) => context.ram[addr.Get(context)];
-    public void Set(in RunTimeContext context, RegVal value) => context.ram[addr.Get(context)] = value;
+    public readonly IOpParam aop = aop;
+    public RegVal Get(in RunTimeContext context)
+    {
+        uint addr = (uint)aop.Get(context);
+        if (addr < context.ram.Length) return context.ram[addr];
+        throw new Exception("Invalid memory read: " + (int)addr);
+    }
+    public void Set(in RunTimeContext context, RegVal value)
+    {
+        uint addr = (uint)aop.Get(context);
+        if (addr < context.ram.Length) context.ram[addr] = value;
+        throw new Exception("Invalid memory write: " + (int)addr);
+    }
+
 }
 
 interface IAsmInst
@@ -341,178 +403,229 @@ interface IAsmInst
     void Execute(in RunTimeContext context);
 }
 
-class AsmInstArith(in IOpParam rd, in IOpParam rs1, in IOpParam rs2)
+class AsmInstArith(in IOpParam dst, in IOpParam src1, in IOpParam src2)
 {
-    protected readonly IOpParam rd = rd, rs1 = rs1, rs2 = rs2;
+    protected readonly IOpParam dst = dst, src1 = src1, src2 = src2;
 }
 
-class AsmInstAdd(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstAdd(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) + rs2.Get(context));
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) + src2.Get(context));
 }
 
-class AsmInstSub(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstAddOptRRI(int rdidx, int rs1idx, RegVal imm) : IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) - rs2.Get(context));
+    readonly int rdidx = rdidx, rs1idx = rs1idx;
+    readonly RegVal imm = imm;
+    public void Execute(in RunTimeContext context) => context.rf[rdidx] = context.rf[rs1idx] + imm;
 }
 
-class AsmInstAnd(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstSub(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) & rs2.Get(context));
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) - src2.Get(context));
 }
 
-class AsmInstOr(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstAnd(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) | rs2.Get(context));
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) & src2.Get(context));
 }
 
-class AsmInstXor(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstOr(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) ^ rs2.Get(context));
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) | src2.Get(context));
 }
 
-class AsmInstSll(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstXor(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) << rs2.Get(context));
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) ^ src2.Get(context));
 }
 
-class AsmInstSrl(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstSll(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) >>> rs2.Get(context));
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) << src2.Get(context));
 }
 
-class AsmInstSra(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstSrl(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) >> rs2.Get(context));
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) >>> src2.Get(context));
 }
 
-class AsmInstEq(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstSra(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) == rs2.Get(context) ? 1 : 0);
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) >> src2.Get(context));
 }
 
-class AsmInstNe(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstEq(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) != rs2.Get(context) ? 1 : 0);
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) == src2.Get(context) ? 1 : 0);
 }
 
-class AsmInstGt(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstNe(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) > rs2.Get(context) ? 1 : 0);
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) != src2.Get(context) ? 1 : 0);
 }
 
-class AsmInstLt(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstLt(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) < rs2.Get(context) ? 1 : 0);
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) < src2.Get(context) ? 1 : 0);
 }
 
-class AsmInstGte(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstGte(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) >= rs2.Get(context) ? 1 : 0);
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context) >= src2.Get(context) ? 1 : 0);
 }
 
-class AsmInstLte(in IOpParam rd, in IOpParam rs1, in IOpParam rs2) : AsmInstArith(rd, rs1, rs2), IAsmInst
+class AsmInstPush(List<IOpParam> srcs) : IAsmInst
 {
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context) <= rs2.Get(context) ? 1 : 0);
-}
-
-class AsmInstPush(List<IOpParam> rslist) : IAsmInst
-{
-    readonly IOpParam[] rslist = [.. rslist];
+    readonly IOpParam[] srcs = [.. srcs];
     public void Execute(in RunTimeContext context)
     {
-        for (int i = 0; i < rslist.Length; i++)
+        ref int sp = ref context.rf[(RegVal)AsmParser.RegId.sp];
+        for (int i = 0; i < srcs.Length; i++)
         {
-            RegVal SP = context.rf[(RegVal)AsmParser.RegId.sp];
-            context.ram[SP] = rslist[i].Get(context);
-            context.rf[(RegVal)AsmParser.RegId.sp]--; // stack pointer decrement
+            if ((uint)sp < context.ram.Length)
+            {
+                context.ram[sp] = srcs[i].Get(context);
+                sp--; // stack pointer decrement
+            }
+            else throw new Exception("Push stack overflow");
         }
     }
 }
 
-class AsmInstPop(List<IOpParam> rslist) : IAsmInst
+class AsmInstPop(List<IOpParam> dsts) : IAsmInst
 {
-    readonly IOpParam[] rslist = [.. rslist];//NOTE: must be reverse
+    readonly IOpParam[] dsts = [.. dsts];//NOTE: must be reverse
     public void Execute(in RunTimeContext context)
     {
-        for (int i = 0; i < rslist.Length; i++)
+        ref int sp = ref context.rf[(RegVal)AsmParser.RegId.sp];
+        for (int i = 0; i < dsts.Length; i++)
         {
-            context.rf[(RegVal)AsmParser.RegId.sp]++;
-            RegVal SP = context.rf[(RegVal)AsmParser.RegId.sp];
-            rslist[i].Set(context, context.ram[SP]);
+            sp++;
+            if ((uint)sp < context.ram.Length)
+            {
+                dsts[i].Set(context, context.ram[sp]);
+            }
+            else throw new Exception("Pop stack underflow");
         }
     }
 }
 
-class AsmInstMv(in IOpParam rd, in IOpParam rs1) : IAsmInst
+class AsmInstMv(in IOpParam dst, in IOpParam src1) : IAsmInst
 {
-    readonly IOpParam rd = rd, rs1 = rs1;
-    public void Execute(in RunTimeContext context) => rd.Set(context, rs1.Get(context));
+    readonly IOpParam dst = dst, src1 = src1;
+    public void Execute(in RunTimeContext context) => dst.Set(context, src1.Get(context));
 }
 
-class AsmInstBr(in IOpParam rs1, in IOpParam rs2, int target)
+class AsmInstMvOptRI(int rdidx, RegVal imm) : IAsmInst
 {
-    protected readonly IOpParam rs1 = rs1, rs2 = rs2;
-    public int target = target;
+    readonly int rdidx = rdidx;
+    readonly RegVal imm = imm;
+    public void Execute(in RunTimeContext context) => context.rf[rdidx] = imm; // omit twice virtual call
 }
 
-class AsmInstBeq(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
+class AsmInstApc(IOpParam dst, IOpParam offset) : IAsmInst
 {
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) == rs2.Get(context)) context.pc = target - 1; }
-}
-
-class AsmInstBne(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
-{
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) != rs2.Get(context)) context.pc = target - 1; }
-}
-
-class AsmInstBlt(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
-{
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) < rs2.Get(context)) context.pc = target - 1; }
-}
-
-class AsmInstBgt(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
-{
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) > rs2.Get(context)) context.pc = target - 1; }
-}
-
-class AsmInstBlte(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
-{
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) <= rs2.Get(context)) context.pc = target - 1; }
-}
-
-class AsmInstBgte(in IOpParam rs1, in IOpParam rs2, int target) : AsmInstBr(rs1, rs2, target), IAsmInst
-{
-    public void Execute(in RunTimeContext context) { if (rs1.Get(context) >= rs2.Get(context)) context.pc = target - 1; }
-}
-
-class AsmInstJ(int target) : IAsmInst
-{
-    int target = target;
-    public void Execute(in RunTimeContext context) => context.pc = target - 1;
-}
-
-class AsmInstJr(IOpParam rs1) : IAsmInst
-{
-    readonly IOpParam rs1 = rs1;
-    public void Execute(in RunTimeContext context) => context.pc = rs1.Get(context) - 1;
-}
-
-class AsmInstApc(IOpParam rd, IOpParam offset) : IAsmInst
-{
-    readonly IOpParam rd = rd;
+    readonly IOpParam dst = dst;
     readonly IOpParam offste = offset;
-    public void Execute(in RunTimeContext context) => rd.Set(context, context.pc + offste.Get(context));
+    public void Execute(in RunTimeContext context) => dst.Set(context, context.pc + offste.Get(context));
 }
+
+class AsmInstBJ(int target) { protected readonly int target = target - 1; }
+
+class AsmInstJr(IOpParam src1) : IAsmInst
+{
+    readonly IOpParam src1 = src1;
+    public void Execute(in RunTimeContext context) => context.pc = src1.Get(context) - 1;
+}
+
+class AsmInstJ(int target) : AsmInstBJ(target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) => context.pc = target;
+}
+
+class AsmInstBr(in IOpParam src1, in IOpParam src2, int target) : AsmInstBJ(target)
+{
+    protected readonly IOpParam src1 = src1, src2 = src2;
+}
+
+class AsmInstBrOptRR(int rs1idx, int rs2idx, int target) : AsmInstBJ(target)
+{
+    protected readonly int rs1idx = rs1idx, rs2idx = rs2idx;
+}
+
+class AsmInstBrOptRI(int rs1idx, RegVal imm, int target) : AsmInstBJ(target)
+{
+    protected readonly int rs1idx = rs1idx;
+    protected readonly RegVal imm = imm;
+}
+
+class AsmInstBeq(in IOpParam src1, in IOpParam src2, int target) : AsmInstBr(src1, src2, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (src1.Get(context) == src2.Get(context)) context.pc = target; }
+}
+
+class AsmInstBne(in IOpParam src1, in IOpParam src2, int target) : AsmInstBr(src1, src2, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (src1.Get(context) != src2.Get(context)) context.pc = target; }
+}
+
+class AsmInstBlt(in IOpParam src1, in IOpParam src2, int target) : AsmInstBr(src1, src2, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (src1.Get(context) < src2.Get(context)) context.pc = target; }
+}
+
+class AsmInstBgte(in IOpParam src1, in IOpParam src2, int target) : AsmInstBr(src1, src2, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (src1.Get(context) >= src2.Get(context)) context.pc = target; }
+}
+
+class AsmInstBeqOptRR(int rs1idx, int rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (context.rf[rs1idx] == context.rf[rs2idx]) context.pc = target; }
+}
+
+class AsmInstBneOptRR(int rs1idx, int rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (context.rf[rs1idx] != context.rf[rs2idx]) context.pc = target; }
+}
+
+class AsmInstBltOptRR(int rs1idx, int rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (context.rf[rs1idx] < context.rf[rs2idx]) context.pc = target; }
+}
+
+class AsmInstBgteOptRR(int rs1idx, int rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (context.rf[rs1idx] >= context.rf[rs2idx]) context.pc = target; }
+}
+
+class AsmInstBeqOptRI(int rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (context.rf[rs1idx] == imm) context.pc = target; }
+}
+
+class AsmInstBneOptRI(int rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (context.rf[rs1idx] != imm) context.pc = target; }
+}
+
+class AsmInstBltOptRI(int rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (context.rf[rs1idx] < imm) context.pc = target; }
+}
+
+class AsmInstBgteOptRI(int rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
+{
+    public void Execute(in RunTimeContext context) { if (context.rf[rs1idx] >= imm) context.pc = target; }
+}
+
+class AsmInstNop : IAsmInst { public void Execute(in RunTimeContext context) { } }
 
 class AsmInstEnd : IAsmInst
 {
-    public void Execute(in RunTimeContext context)
-    {
-        context.finished = true;
-    }
+    public void Execute(in RunTimeContext context) => context.finished = true;
 }
 
-
-delegate IAsmInst ALUInstFactory(IOpParam rd, IOpParam rs1, IOpParam rs2);
-delegate IAsmInst BRUInstFactory(IOpParam rs1, IOpParam rs2, int target);
+delegate IAsmInst ALUInstFactory(IOpParam dst, IOpParam src1, IOpParam src2);
+delegate IAsmInst BRUInstFactory(IOpParam src1, IOpParam src2, int target);
