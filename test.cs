@@ -44,11 +44,13 @@ loop:
 ";
 
 string inout = @"
-    in s0 0
-    sync
+loop:
+c+ s0 s0 1
+sync
+j loop
 ";
 
-MyProgram myProgram = new(inout);
+MyProgram myProgram = new(fibocode);
 Stopwatch sw = Stopwatch.StartNew();
 myProgram.input = 2;
 myProgram.Run();
@@ -66,7 +68,7 @@ class MyProgram : PSASMContext
 
     public void Run()
     {
-        while (Step()) ;
+        while (Steps(100)) ;
     }
 
     public int GetResult(int regid) => rf[regid];

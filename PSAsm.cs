@@ -40,7 +40,10 @@ namespace PSASM
         public RegVal output;
 
         public bool finished = false;
+
+        public delegate void IOSync(ref RegVal input, RegVal output);
         public bool sync = false;
+        public IOSync? onSync;
 
         public PSASMContext()
         {
@@ -53,11 +56,14 @@ namespace PSASM
 
         public void Reset()
         {
+            numInsts = 0;
             pc = 0;
+            for (int i = 0; i < (int)AsmParser.RegId.NumRegs; i++) rf[i] = 0;
             rf[(RegVal)AsmParser.RegId.sp] = ram.Length - 1;
             input = 0;
             output = 0;
             finished = false;
+            sync = false;
         }
 
         public void Programming(string program)
@@ -74,12 +80,21 @@ namespace PSASM
             PlaceHolder();
         }
 
-        public bool Step()
+        public bool Steps(int steps)
+        {
+            for (int i = 0; i < steps && !(finished || sync); i++)
+            {
+                rom[pc].Execute(this); ++pc;
+            }
+            if (sync) { sync = false; onSync?.Invoke(ref input, output); }
+            return !finished;
+        }
+
+        public bool Step() // continue if true
         {
             rom[pc].Execute(this); ++pc;
-            var ret = !finished || sync;
-            sync = false;
-            return ret;
+            if (sync) { sync = false; onSync?.Invoke(ref input, output); }
+            return !finished;
         }
 
         void PushInst(IAsmInst inst)
