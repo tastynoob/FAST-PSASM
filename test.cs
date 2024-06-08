@@ -1,8 +1,15 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using PSASM;
 
-string fibocode = @"
+// SerializeTest();
+DeserializeTest();
+
+
+static void SerializeTest()
+{
+    string fibocode = @"
     j main
 fibo:
     push ra s1 s2   ; save context
@@ -25,42 +32,32 @@ main:
     j fibo          ; call fibo fibo(20) should is 6765
 ";
 
-string testcode = @"
-    ; here sp is default set to 255
-    mv s3 100000000
-    mv s4 0
-loop:
-    mv s0 1
-    mv s1 2
-    mv s2 3
-    push s0 s1 s2
-    mv s0 0
-    mv s1 0 
-    mv s2 0
-    pop s0 s1 s2
-    c+ s4 s4 1
-    b< s4 s3 loop
-    apc s0 0
-";
 
-string inout = @"
-loop:
-c+ s0 s0 1
-sync
-j loop
-";
+    MyProgram myProgram = new(fibocode)
+    {
+        input = 2
+    };
+    myProgram.Steps(1000000);
+    Console.WriteLine("res: " + myProgram.GetResult((int)AsmParser.RegId.s0));
+    Console.WriteLine("Serialize Test");
+    AsmSerializer.Serialize(myProgram, out byte[] bytes);
+    System.IO.File.WriteAllBytes("test.psa", bytes);
+}
 
-MyProgram myProgram = new(fibocode);
-Stopwatch sw = Stopwatch.StartNew();
-myProgram.input = 2;
-myProgram.Run();
-sw.Stop();
-Console.WriteLine("res: " + myProgram.GetResult((int)AsmParser.RegId.s0));
-Console.WriteLine("time: " + sw.Elapsed.TotalMilliseconds + "ms");
+static void DeserializeTest()
+{
+    Console.WriteLine("Deserialize Test");
+    MyProgram myProgram = new();
+    AsmSerializer.Deserialize(System.IO.File.ReadAllBytes("test.psa"), myProgram);
+    myProgram.Run();
+    Console.WriteLine("res: " + myProgram.GetResult((int)AsmParser.RegId.s0));
+}
+
 
 
 class MyProgram : PSASMContext
 {
+    public MyProgram() { }
     public MyProgram(in string program)
     {
         Programming(program);

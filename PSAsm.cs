@@ -3,6 +3,12 @@ using System.Collections.Generic;
 using System;
 
 using RegVal = int;
+using System.Text;
+using System.Text.Json;
+using System.Reflection;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Runtime.CompilerServices;
 
 
 namespace PSASM
@@ -26,23 +32,20 @@ namespace PSASM
     sync                    : sync io
     */
 
-    public class PSASMContext
+    public class PSASMContext : ISaveable
     {
-        readonly AsmParser asmParser = new();
         const int MaxInsts = 128;
+        public delegate void IOSync(ref RegVal input, RegVal output);
+        readonly AsmParser asmParser = new();
         int numInsts;
-        readonly IAsmInst[] rom;
+        public readonly IAsmInst[] rom;
         public RegVal pc;
-        public RegVal[] rf;
-        public RegVal[] ram;
+        public RegVal[] rf, ram;
 
         public RegVal input;
         public RegVal output;
 
-        public bool finished = false;
-
-        public delegate void IOSync(ref RegVal input, RegVal output);
-        public bool sync = false;
+        public bool finished = false, sync = false;
         public IOSync? onSync;
 
         public PSASMContext()
@@ -97,6 +100,17 @@ namespace PSASM
             return !finished;
         }
 
+        public string ToJson()
+        {
+            object[] obj = [new ImmOpParam(12), new RegOpParam(0)];
+            return JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true });
+        }
+
+        public static PSASMContext FromJson(string json)
+        {
+            return null;
+        }
+
         void PushInst(IAsmInst inst)
         {
             if (numInsts >= MaxInsts) throw new Exception("Too many instructions");
@@ -114,13 +128,72 @@ namespace PSASM
                 numInsts++;
             }
         }
+
+
+        public void Store(in List<uint> lst)
+        {
+            // serialize rom
+            lst.Add((uint)numInsts);
+            for (int i = 0; i < numInsts; i++)
+            {
+                AsmSerializer.SerializeOne(lst, (ISaveable)rom[i]);
+            }
+            // serialize rf
+            lst.Add((uint)rf.Length);
+            for (int i = 0; i < rf.Length; i++)
+            {
+                lst.Add((uint)rf[i]);
+            }
+            // serialize ram
+            lst.Add((uint)ram.Length);
+            for (int i = 0; i < ram.Length; i++)
+            {
+                lst.Add((uint)ram[i]);
+            }
+            // serialize other
+            lst.Add((uint)pc);
+            lst.Add((uint)input);
+            lst.Add((uint)output);
+            lst.Add(finished ? 1u : 0u);
+            lst.Add(sync ? 1u : 0u);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            // load rom
+            numInsts = (int)it.Current; it.MoveNext();
+            for (int i = 0; i < numInsts; i++)
+            {
+                rom[i] = AsmSerializer.DeserializeOne(it) as IAsmInst ?? throw new Exception("Invalid instruction, may be a broken serialized data");
+            }
+            // load rf
+            int rfLen = (int)it.Current; it.MoveNext();
+            rf = new RegVal[rfLen];
+            for (int i = 0; i < rfLen; i++)
+            {
+                rf[i] = (RegVal)it.Current; it.MoveNext();
+            }
+            // load ram
+            int ramLen = (int)it.Current; it.MoveNext();
+            ram = new RegVal[ramLen];
+            for (int i = 0; i < ramLen; i++)
+            {
+                ram[i] = (RegVal)it.Current; it.MoveNext();
+            }
+            // load other
+            pc = (RegVal)it.Current; it.MoveNext();
+            input = (RegVal)it.Current; it.MoveNext();
+            output = (RegVal)it.Current; it.MoveNext();
+            finished = it.Current == 1u; it.MoveNext();
+            sync = it.Current == 1u; it.MoveNext();
+        }
     }
 
     class AsmParser
     {
         public enum RegId { ra, sp, s0, s1, s2, s3, s4, s5, NumRegs };
 
-        readonly static Dictionary<string, int> regidmap = new(){
+        readonly static Dictionary<string, uint> regidmap = new(){
         // x0-x7   :  alias
         {"x0" , 0 }, {"ra", 0},
         {"x1" , 1 }, {"sp", 1},
@@ -205,9 +278,9 @@ namespace PSASM
                 IOpParam addrOp = ParseOpParam(addr);
                 return new MemOpParam(addrOp);
             }
-            if (regidmap.TryGetValue(token, out int value)) // regop
+            if (regidmap.TryGetValue(token, out uint value)) // regop
             {
-                int regid = value;
+                uint regid = value;
                 return new RegOpParam(regid);
             }
             throw new Exception("Invalid operand:" + token);
@@ -334,29 +407,48 @@ namespace PSASM
         }
     }
 
-    interface IOpParam
+    interface IOpParam : ISaveable
     {
         RegVal Get(in PSASMContext context);
         void Set(in PSASMContext context, RegVal value);
     }
 
-    class RegOpParam(int regid) : IOpParam
+    class RegOpParam(uint regid) : IOpParam
     {
-        public readonly int regid = regid;
+        public uint regid = regid;
         public RegVal Get(in PSASMContext context) => context.rf[regid];
         public void Set(in PSASMContext context, RegVal value) => context.rf[regid] = value;
+
+        public void Store(in List<uint> lst)
+        {
+            if (regid >= 8) throw new Exception("Save error! Invalid register id:" + regid);
+            lst.Add(regid);
+        }
+        public void Load(in IEnumerator<uint> it)
+        {
+            regid = it.Current; it.MoveNext();
+            if (regid >= 8) throw new Exception("Load error! Invalid register id: " + regid + ", mabe a broken serialized data");
+        }
     }
 
     class ImmOpParam(RegVal imm) : IOpParam
     {
-        public readonly RegVal imm = imm;
+        public RegVal imm = imm;
         public RegVal Get(in PSASMContext context) => imm;
         public void Set(in PSASMContext context, RegVal value) { throw new Exception("Cannot set value of immediate operand"); }
+        public void Store(in List<uint> lst)
+        {
+            lst.Add((uint)imm);
+        }
+        public void Load(in IEnumerator<uint> it)
+        {
+            imm = (int)it.Current; it.MoveNext();
+        }
     }
 
-    class MemOpParam(IOpParam aop) : IOpParam
+    class MemOpParam(IOpParam aop) : IOpParam, ISaveable
     {
-        public readonly IOpParam aop = aop;
+        IOpParam aop = aop;
         public RegVal Get(in PSASMContext context)
         {
             uint addr = (uint)aop.Get(context);
@@ -369,33 +461,65 @@ namespace PSASM
             if (addr < context.ram.Length) context.ram[addr] = value;
             throw new Exception("Invalid memory write: " + (int)addr);
         }
+        public void Store(in List<uint> lst)
+        {
+            AsmSerializer.SerializeOne(lst, aop);
+        }
+        public void Load(in IEnumerator<uint> it)
+        {
+            aop = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid aop operand, may be a broken serialized data");
+        }
     }
 
     class IOOpParam(int portid) : IOpParam
     {
-        readonly int portid = portid;// no used
+        int portid = portid;// no used
         public RegVal Get(in PSASMContext context) => context.input;
         public void Set(in PSASMContext context, RegVal value) => context.output = value;
+
+        public void Store(in List<uint> lst)
+        {
+            lst.Add((uint)portid);
+        }
+        public void Load(in IEnumerator<uint> it)
+        {
+            portid = (int)it.Current; it.MoveNext();
+            if (portid != 0) throw new Exception("Invalid portid: " + portid + ", may be a broken serialized data");
+        }
     }
 
-    interface IAsmInst
+    public interface IAsmInst
     {
         void Execute(in PSASMContext context);
     }
 
-    class AsmInstArith(in IOpParam dst, in IOpParam src1, in IOpParam src2)
+    class AsmInstArith(in IOpParam dst, in IOpParam src1, in IOpParam src2) : ISaveable
     {
-        protected readonly IOpParam dst = dst, src1 = src1, src2 = src2;
+        protected IOpParam dst = dst, src1 = src1, src2 = src2;
+
+        public void Store(in List<uint> lst)
+        {
+            AsmSerializer.SerializeOne(lst, dst);
+            AsmSerializer.SerializeOne(lst, src1);
+            AsmSerializer.SerializeOne(lst, src2);
+        }
+        public void Load(in IEnumerator<uint> it)
+        {
+            dst = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid dst operand, may be a broken serialized data");
+            src1 = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid src1 operand, may be a broken serialized data");
+            src2 = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid src2 operand, may be a broken serialized data");
+        }
     }
 
     class AsmInstAdd(in IOpParam dst, in IOpParam src1, in IOpParam src2) : AsmInstArith(dst, src1, src2), IAsmInst
     {
+
         public void Execute(in PSASMContext context) => dst.Set(context, src1.Get(context) + src2.Get(context));
     }
 
-    class AsmInstAddOptRRI(int rdidx, int rs1idx, RegVal imm) : IAsmInst
+    class AsmInstAddOptRRI(uint rdidx, uint rs1idx, RegVal imm) : IAsmInst
     {
-        readonly int rdidx = rdidx, rs1idx = rs1idx;
+        readonly uint rdidx = rdidx, rs1idx = rs1idx;
         readonly RegVal imm = imm;
         public void Execute(in PSASMContext context) => context.rf[rdidx] = context.rf[rs1idx] + imm;
     }
@@ -455,9 +579,9 @@ namespace PSASM
         public void Execute(in PSASMContext context) => dst.Set(context, src1.Get(context) >= src2.Get(context) ? 1 : 0);
     }
 
-    class AsmInstPush(List<IOpParam> srcs) : IAsmInst
+    class AsmInstPush(List<IOpParam> srcs) : IAsmInst, ISaveable
     {
-        readonly IOpParam[] srcs = [.. srcs];
+        IOpParam[] srcs = [.. srcs];
         public void Execute(in PSASMContext context)
         {
             ref int sp = ref context.rf[(RegVal)AsmParser.RegId.sp];
@@ -471,11 +595,28 @@ namespace PSASM
                 else throw new Exception("Push stack overflow");
             }
         }
+
+        public void Store(in List<uint> lst)
+        {
+            lst.Add((uint)srcs.Length);
+            foreach (var src in srcs) AsmSerializer.SerializeOne(lst, src);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            int len = (int)it.Current; it.MoveNext();
+            srcs = new IOpParam[len];
+            for (int i = 0; i < len; i++)
+            {
+                srcs[i] = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid src operand, may be a broken serialized data");
+            }
+        }
+
     }
 
-    class AsmInstPop(List<IOpParam> dsts) : IAsmInst
+    class AsmInstPop(List<IOpParam> dsts) : IAsmInst, ISaveable
     {
-        readonly IOpParam[] dsts = [.. dsts];//NOTE: must be reverse
+        IOpParam[] dsts = [.. dsts];//NOTE: must be reverse
         public void Execute(in PSASMContext context)
         {
             ref int sp = ref context.rf[(RegVal)AsmParser.RegId.sp];
@@ -489,55 +630,173 @@ namespace PSASM
                 else throw new Exception("Pop stack underflow");
             }
         }
+
+        public void Store(in List<uint> lst)
+        {
+            lst.Add((uint)dsts.Length);
+            foreach (var dst in dsts) AsmSerializer.SerializeOne(lst, dst);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            int len = (int)it.Current; it.MoveNext();
+            dsts = new IOpParam[len];
+            for (int i = 0; i < len; i++)
+            {
+                dsts[i] = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid dst operand, may be a broken serialized data");
+            }
+        }
     }
 
-    class AsmInstMv(in IOpParam dst, in IOpParam src1) : IAsmInst
+    class AsmInstMv(in IOpParam dst, in IOpParam src1) : IAsmInst, ISaveable
     {
-        readonly IOpParam dst = dst, src1 = src1;
+        IOpParam dst = dst, src1 = src1;
         public void Execute(in PSASMContext context) => dst.Set(context, src1.Get(context));
+
+        public void Store(in List<uint> lst)
+        {
+            AsmSerializer.SerializeOne(lst, dst);
+            AsmSerializer.SerializeOne(lst, src1);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            dst = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid dst operand, may be a broken serialized data");
+            src1 = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid src1 operand, may be a broken serialized data");
+        }
     }
 
-    class AsmInstMvOptRI(int rdidx, RegVal imm) : IAsmInst
+    class AsmInstMvOptRI(uint rdidx, RegVal imm) : IAsmInst, ISaveable
     {
-        readonly int rdidx = rdidx;
-        readonly RegVal imm = imm;
+        uint rdidx = rdidx;
+        RegVal imm = imm;
         public void Execute(in PSASMContext context) => context.rf[rdidx] = imm; // omit twice virtual call
+
+        public void Store(in List<uint> lst)
+        {
+            lst.Add(rdidx);
+            lst.Add((uint)imm);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            rdidx = it.Current; it.MoveNext();
+            if (rdidx >= 8) throw new Exception("Load error! Invalid register id: " + rdidx + ", mabe a broken serialized data");
+            imm = (int)it.Current; it.MoveNext();
+        }
     }
 
-    class AsmInstApc(IOpParam dst, IOpParam offset) : IAsmInst
+    class AsmInstApc(IOpParam dst, IOpParam offset) : IAsmInst, ISaveable
     {
-        readonly IOpParam dst = dst;
-        readonly IOpParam offste = offset;
-        public void Execute(in PSASMContext context) => dst.Set(context, context.pc + offste.Get(context));
+        IOpParam dst = dst;
+        IOpParam offset = offset;
+        public void Execute(in PSASMContext context) => dst.Set(context, context.pc + offset.Get(context));
+
+        public void Store(in List<uint> lst)
+        {
+            AsmSerializer.SerializeOne(lst, dst);
+            AsmSerializer.SerializeOne(lst, offset);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            dst = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid dst operand, may be a broken serialized data");
+            offset = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid offset operand, may be a broken serialized data");
+        }
     }
 
-    class AsmInstBJ(int target) { protected readonly int target = target - 1; }
+    class AsmInstBJ(int target) { protected int target = target - 1; }
 
-    class AsmInstJr(IOpParam src1) : IAsmInst
+    class AsmInstJr(IOpParam src1) : IAsmInst, ISaveable
     {
-        readonly IOpParam src1 = src1;
+        IOpParam src1 = src1;
         public void Execute(in PSASMContext context) => context.pc = src1.Get(context) - 1;
+
+        public void Store(in List<uint> lst)
+        {
+            AsmSerializer.SerializeOne(lst, src1);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            src1 = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid src1 operand, may be a broken serialized data");
+        }
     }
 
-    class AsmInstJ(int target) : AsmInstBJ(target), IAsmInst
+    class AsmInstJ(int target) : AsmInstBJ(target), IAsmInst, ISaveable
     {
         public void Execute(in PSASMContext context) => context.pc = target;
+
+        public void Store(in List<uint> lst)
+        {
+            lst.Add((uint)target);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            target = (int)it.Current; it.MoveNext();
+        }
     }
 
-    class AsmInstBr(in IOpParam src1, in IOpParam src2, int target) : AsmInstBJ(target)
+    class AsmInstBr(in IOpParam src1, in IOpParam src2, int target) : AsmInstBJ(target), ISaveable
     {
-        protected readonly IOpParam src1 = src1, src2 = src2;
+        protected IOpParam src1 = src1, src2 = src2;
+
+        public void Store(in List<uint> lst)
+        {
+            AsmSerializer.SerializeOne(lst, src1);
+            AsmSerializer.SerializeOne(lst, src2);
+            lst.Add((uint)target);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            src1 = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid src1 operand, may be a broken serialized data");
+            src2 = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid src2 operand, may be a broken serialized data");
+            target = (int)it.Current; it.MoveNext();
+        }
     }
 
-    class AsmInstBrOptRR(int rs1idx, int rs2idx, int target) : AsmInstBJ(target)
+    class AsmInstBrOptRR(uint rs1idx, uint rs2idx, int target) : AsmInstBJ(target), ISaveable
     {
-        protected readonly int rs1idx = rs1idx, rs2idx = rs2idx;
+        protected uint rs1idx = rs1idx, rs2idx = rs2idx;
+
+        public void Store(in List<uint> lst)
+        {
+            lst.Add(rs1idx);
+            lst.Add(rs2idx);
+            lst.Add((uint)target);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            rs1idx = it.Current; it.MoveNext();
+            if (rs1idx >= 8) throw new Exception("Load error! Invalid register id: " + rs1idx + ", mabe a broken serialized data");
+            rs2idx = it.Current; it.MoveNext();
+            if (rs2idx >= 8) throw new Exception("Load error! Invalid register id: " + rs2idx + ", mabe a broken serialized data");
+            target = (int)it.Current; it.MoveNext();
+        }
     }
 
-    class AsmInstBrOptRI(int rs1idx, RegVal imm, int target) : AsmInstBJ(target)
+    class AsmInstBrOptRI(uint rs1idx, RegVal imm, int target) : AsmInstBJ(target), ISaveable
     {
-        protected readonly int rs1idx = rs1idx;
-        protected readonly RegVal imm = imm;
+        protected uint rs1idx = rs1idx;
+        protected RegVal imm = imm;
+
+        public void Store(in List<uint> lst)
+        {
+            lst.Add(rs1idx);
+            lst.Add((uint)imm);
+            lst.Add((uint)target);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            rs1idx = it.Current; it.MoveNext();
+            if (rs1idx >= 8) throw new Exception("Load error! Invalid register id: " + rs1idx + ", mabe a broken serialized data");
+            imm = (int)it.Current; it.MoveNext();
+            target = (int)it.Current; it.MoveNext();
+        }
     }
 
     class AsmInstBeq(in IOpParam src1, in IOpParam src2, int target) : AsmInstBr(src1, src2, target), IAsmInst
@@ -560,71 +819,176 @@ namespace PSASM
         public void Execute(in PSASMContext context) { if (src1.Get(context) >= src2.Get(context)) context.pc = target; }
     }
 
-    class AsmInstBeqOptRR(int rs1idx, int rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
+    class AsmInstBeqOptRR(uint rs1idx, uint rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
     {
         public void Execute(in PSASMContext context) { if (context.rf[rs1idx] == context.rf[rs2idx]) context.pc = target; }
     }
 
-    class AsmInstBneOptRR(int rs1idx, int rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
+    class AsmInstBneOptRR(uint rs1idx, uint rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
     {
         public void Execute(in PSASMContext context) { if (context.rf[rs1idx] != context.rf[rs2idx]) context.pc = target; }
     }
 
-    class AsmInstBltOptRR(int rs1idx, int rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
+    class AsmInstBltOptRR(uint rs1idx, uint rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
     {
         public void Execute(in PSASMContext context) { if (context.rf[rs1idx] < context.rf[rs2idx]) context.pc = target; }
     }
 
-    class AsmInstBgteOptRR(int rs1idx, int rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
+    class AsmInstBgteOptRR(uint rs1idx, uint rs2idx, int target) : AsmInstBrOptRR(rs1idx, rs2idx, target), IAsmInst
     {
         public void Execute(in PSASMContext context) { if (context.rf[rs1idx] >= context.rf[rs2idx]) context.pc = target; }
     }
 
-    class AsmInstBeqOptRI(int rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
+    class AsmInstBeqOptRI(uint rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
     {
         public void Execute(in PSASMContext context) { if (context.rf[rs1idx] == imm) context.pc = target; }
     }
 
-    class AsmInstBneOptRI(int rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
+    class AsmInstBneOptRI(uint rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
     {
         public void Execute(in PSASMContext context) { if (context.rf[rs1idx] != imm) context.pc = target; }
     }
 
-    class AsmInstBltOptRI(int rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
+    class AsmInstBltOptRI(uint rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
     {
         public void Execute(in PSASMContext context) { if (context.rf[rs1idx] < imm) context.pc = target; }
     }
 
-    class AsmInstBgteOptRI(int rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
+    class AsmInstBgteOptRI(uint rs1idx, RegVal imm, int target) : AsmInstBrOptRI(rs1idx, imm, target), IAsmInst
     {
         public void Execute(in PSASMContext context) { if (context.rf[rs1idx] >= imm) context.pc = target; }
     }
 
-    class AsmInstIn(in IOpParam dst, in IOpParam io, in IOpParam offset) : IAsmInst
+    class AsmInstIn(in IOpParam dst, in IOpParam io, in IOpParam offset) : IAsmInst, ISaveable
     {
-        protected readonly IOpParam dst = dst, io = io, offset = offset;
+        protected IOpParam dst = dst, io = io, offset = offset;
         public void Execute(in PSASMContext context) => dst.Set(context, dst.Get(context) | (io.Get(context) << offset.Get(context)));
+
+        public void Store(in List<uint> lst)
+        {
+            AsmSerializer.SerializeOne(lst, dst);
+            AsmSerializer.SerializeOne(lst, io);
+            AsmSerializer.SerializeOne(lst, offset);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            dst = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid dst operand, may be a broken serialized data");
+            io = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid io operand, may be a broken serialized data");
+            offset = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid offset operand, may be a broken serialized data");
+        }
     }
 
-    class AsmInstOut(in IOpParam io, in IOpParam src1, in IOpParam offset) : IAsmInst
+    class AsmInstOut(in IOpParam io, in IOpParam src1, in IOpParam offset) : IAsmInst, ISaveable
     {
-        protected readonly IOpParam io = io, src1 = src1, offset = offset;
+        protected IOpParam io = io, src1 = src1, offset = offset;
         public void Execute(in PSASMContext context) => io.Set(context, src1.Get(context) >> offset.Get(context));
+
+        public void Store(in List<uint> lst)
+        {
+            AsmSerializer.SerializeOne(lst, io);
+            AsmSerializer.SerializeOne(lst, src1);
+            AsmSerializer.SerializeOne(lst, offset);
+        }
+
+        public void Load(in IEnumerator<uint> it)
+        {
+            io = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid io operand, may be a broken serialized data");
+            src1 = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid src1 operand, may be a broken serialized data");
+            offset = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid offset operand, may be a broken serialized data");
+        }
     }
 
-    class AsmInstSync : IAsmInst
+    class AsmInstSync : IAsmInst, ISaveable
     {
         public void Execute(in PSASMContext context) { context.sync = true; }
+        public void Store(in List<uint> lst) { }
+        public void Load(in IEnumerator<uint> it) { }
     }
 
-    class AsmInstNop : IAsmInst { public void Execute(in PSASMContext context) { } }
+    class AsmInstNop : IAsmInst, ISaveable
+    {
+        public void Execute(in PSASMContext context) { }
+        public void Store(in List<uint> lst) { }
+        public void Load(in IEnumerator<uint> it) { }
+    }
 
-    class AsmInstEnd : IAsmInst
+    class AsmInstEnd : IAsmInst, ISaveable
     {
         public void Execute(in PSASMContext context) => context.finished = true;
+        public void Store(in List<uint> lst) { }
+        public void Load(in IEnumerator<uint> it) { }
     }
 
     delegate IAsmInst ALUInstFactory(IOpParam dst, IOpParam src1, IOpParam src2);
     delegate IAsmInst BRUInstFactory(IOpParam src1, IOpParam src2, int target);
+
+    public interface ISaveable
+    {
+        void Store(in List<uint> lst);
+        void Load(in IEnumerator<uint> it);
+    }
+
+    public class AsmSerializer
+    {
+        readonly static Type[] classes = Assembly.GetExecutingAssembly().GetTypes().Where(t => t.Namespace == "PSASM" && (t.Name.StartsWith("AsmInst") || t.Name.EndsWith("OpParam"))).ToArray();
+        readonly static Dictionary<uint, Type> typemapbyhash = classes.ToDictionary(t => JSHash(t.Name), t => t);
+
+        public static Type GetTypeByHash(uint hash)
+        {
+            if (typemapbyhash.TryGetValue(hash, out Type type))
+            {
+                return type;
+            }
+            throw new Exception("Unknown type hash: " + hash);
+        }
+
+        public static void SerializeOne(in List<uint> lst, ISaveable obj)
+        {
+            uint hash = JSHash(obj.GetType().Name);
+            lst.Add(hash);
+            obj.Store(lst);
+        }
+
+        public static ISaveable DeserializeOne(in IEnumerator<uint> it)
+        {
+            uint hash = it.Current; it.MoveNext();
+            Type type = GetTypeByHash(hash);
+            ISaveable obj = RuntimeHelpers.GetUninitializedObject(type) as ISaveable ?? throw new Exception("Failed to convert to ISaveable");
+            obj.Load(it);
+            return obj;
+        }
+
+        public static void Serialize(PSASMContext context, out byte[] bytes)
+        {
+            if (!typemapbyhash.ContainsKey(JSHash("AsmInstAdd"))) throw new Exception("Failed to initialize typemapbyhash");
+            List<uint> lst = [];
+            context.Store(lst);
+            bytes = lst.SelectMany(BitConverter.GetBytes).ToArray();
+        }
+
+        public static void Deserialize(in byte[] bytes, in PSASMContext context)
+        {
+            if (!typemapbyhash.ContainsKey(JSHash("AsmInstAdd"))) throw new Exception("Failed to initialize typemapbyhash");
+            uint[] data = new uint[bytes.Length / 4];
+            Buffer.BlockCopy(bytes, 0, data, 0, bytes.Length);
+            var it = ((IEnumerable<uint>)data).GetEnumerator();
+            it.MoveNext();
+            context.Load(it);
+        }
+
+        public static uint JSHash(string str)
+        {
+            uint hash = 0;
+            for (int i = 0; i < str.Length; i++)
+            {
+                hash = (hash << 5) + hash + str[i];
+            }
+            return hash;
+        }
+
+
+    }
+
 
 }
