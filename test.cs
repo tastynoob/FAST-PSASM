@@ -48,7 +48,11 @@ static void DeserializeTest()
 {
     Console.WriteLine("Deserialize Test");
     MyProgram myProgram = new();
+    Stopwatch sw = new();
+    sw.Start();
     AsmSerializer.Deserialize(System.IO.File.ReadAllBytes("test.psa"), myProgram);
+    sw.Stop();
+    Console.WriteLine("deserialization time: " + sw.Elapsed.TotalMilliseconds + "ms");
     myProgram.Run();
     Console.WriteLine("res: " + myProgram.GetResult((int)AsmParser.RegId.s0));
 }
