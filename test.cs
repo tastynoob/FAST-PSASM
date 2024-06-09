@@ -6,7 +6,6 @@ using PSASM;
 // SerializeTest();
 DeserializeTest();
 
-
 static void SerializeTest()
 {
     string fibocode = @"
