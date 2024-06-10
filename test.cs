@@ -1,10 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Text.Json.Nodes;
 using PSASM;
-
-// SerializeTest();
-DeserializeTest();
 
 static void SerializeTest()
 {
@@ -56,6 +54,30 @@ static void DeserializeTest()
     Console.WriteLine("res: " + myProgram.GetResult((int)AsmParser.RegId.s0));
 }
 
+static void CompileTest()
+{
+    string program = @"
+    a = 1+1 
+    if a==1
+        a = 2+2
+        b = 1
+    endif
+    b = 2
+    if b == 2
+        b=1
+    endif
+";
+    PSCompiler compiler = new();
+    var tree = compiler.CompileToAst(program);
+    var asm = compiler.CompileToAsm(tree);
+    Console.WriteLine(tree.ToJson());
+    Console.WriteLine(asm);
+
+    MyProgram myProgram = new(asm);
+    myProgram.Run();
+}
+
+CompileTest();
 
 
 class MyProgram : PSASMContext

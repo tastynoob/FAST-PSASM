@@ -70,7 +70,7 @@ namespace PSASM
             foreach (string line in lines)
             {
                 if (line.Length == 0 || line.EndsWith(":")) continue;
-                IAsmInst inst = asmParser.ParseInst(line.ToLower());
+                IAsmInst inst = asmParser.ParseInst(line);
                 PushInst(inst);
             }
             PlaceHolder();
@@ -270,7 +270,7 @@ namespace PSASM
         public IAsmInst ParseInst(in string inst)
         {
             string[] token = inst.Split(' ');
-            string name = token[0];
+            string name = token[0].ToLower();
             if (name.StartsWith("c"))
             {
                 if (token.Length != 4) throw new Exception("Invalid cal instruction");
@@ -430,13 +430,13 @@ namespace PSASM
         {
             uint addr = (uint)aop.Get(context);
             if (addr < context.ram.Length) return context.ram[addr];
-            throw new Exception("Invalid memory read: " + (int)addr);
+            else throw new Exception("Invalid memory read: " + (int)addr);
         }
         public void Set(in PSASMContext context, RegVal value)
         {
             uint addr = (uint)aop.Get(context);
             if (addr < context.ram.Length) context.ram[addr] = value;
-            throw new Exception("Invalid memory write: " + (int)addr);
+            else throw new Exception("Invalid memory write: " + (int)addr);
         }
         public void Store(in List<uint> lst) => AsmSerializer.SerializeOne(lst, aop);
         public void Load(in IEnumerator<uint> it)
