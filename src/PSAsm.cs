@@ -14,6 +14,7 @@ namespace PSASM
         imm: 1 2 3
         regid: x0-x7 or ra,sp,s0-s5
         mem: [imm] or [regid] or [[[..]]]
+        sp-based offset: (imm) or (regid) or (((...)))
 
         instructions:
         c[op] dst src1 src2     : dst = src1 op src2
@@ -26,6 +27,10 @@ namespace PSASM
         in dst io (shift)       : dst = dst | (io << shift), shift is optional default is 0, io: 0, 1...
         out io src1 (shift)     : out = (src1 >> shift), , shift is optional default is 0
         sync                    : sync io, it will reduce execution efficiency
+
+        sp-based access and directly access
+        mv (0) 1 -> mem[sp - 0] = 1
+        mv [0] 1 -> mem[0] = 1
     */
 
     public class PSASMContext : ISaveable
@@ -188,6 +193,7 @@ namespace PSASM
 
         readonly static Regex regexImm = new(@"^(0x)?(-?[0-9]+)");
         readonly static Regex regexMem = new(@"^\[(.*)\]");
+        readonly static Regex regexOffset = new(@"^\((.*)\)");
 
         #region
         readonly static Dictionary<string, ALUInstFactory> alInst = new(){
@@ -258,6 +264,13 @@ namespace PSASM
                 string addr = match[0].Groups[1].Value;
                 IOpParam addrOp = ParseOpParam(addr);
                 return new MemOpParam(addrOp);
+            }
+            match = regexOffset.Matches(token);
+            if (match.Count > 0) // off op
+            {
+                string off = match[0].Groups[1].Value;
+                IOpParam offOp = ParseOpParam(off);
+                return new OffOpParam(offOp);
             }
             if (regidmap.TryGetValue(token, out uint value)) // regop
             {
@@ -435,6 +448,30 @@ namespace PSASM
         public void Set(in PSASMContext context, RegVal value)
         {
             uint addr = (uint)aop.Get(context);
+            if (addr < context.ram.Length) context.ram[addr] = value;
+            else throw new Exception("Invalid memory write: " + (int)addr);
+        }
+        public void Store(in List<uint> lst) => AsmSerializer.SerializeOne(lst, aop);
+        public void Load(in IEnumerator<uint> it)
+        {
+            aop = AsmSerializer.DeserializeOne(it) as IOpParam ?? throw new Exception("Invalid aop operand, may be a broken serialized data");
+        }
+    }
+
+    class OffOpParam(IOpParam aop) : IOpParam, ISaveable
+    {
+        IOpParam aop = aop;
+        public RegVal Get(in PSASMContext context)
+        {
+            uint off = (uint)aop.Get(context);
+            uint addr = (uint)context.rf[(RegVal)AsmParser.RegId.sp] - off;
+            if (addr < context.ram.Length) return context.ram[addr];
+            else throw new Exception("Invalid memory read: " + (int)addr);
+        }
+        public void Set(in PSASMContext context, RegVal value)
+        {
+            uint off = (uint)aop.Get(context);
+            uint addr = (uint)context.rf[(RegVal)AsmParser.RegId.sp] - off;
             if (addr < context.ram.Length) context.ram[addr] = value;
             else throw new Exception("Invalid memory write: " + (int)addr);
         }

@@ -6,29 +6,34 @@ using PSASM;
 
 static void SerializeTest()
 {
-    string fibocode = @"
-    j main
-fibo:
-    push ra s1 s2   ; save context
-    b< s0 2 ret     ; if x < 2 return 2
-    mv s2 s0        ; s2 = x
-    c- s0 s2 1      ; fibo(x-1)
-    apc ra 2        ; set return address
-    j fibo          ; call fibo
-    mv s1 s0        ; t = fibo(x-1)
-    c- s0 s2 2      ; fibo(x-2)
-    apc ra 2        ; set return address
-    j fibo          ; call fibo
-    c+ s0 s0 s1     ; return fibo(x-1) + fibo(x-2)
-ret:
-    pop ra s1 s2    ; restore context
-    j ra ; return
-main:
-    mv s0 35        ; set x, use s0 as arg and result
-    apc ra 2
-    j fibo          ; call fibo fibo(20) should is 6765
-";
+    //     string fibocode = @"
+    //     j main
+    // _fibo:
+    //     push ra s1 s2   ; save context
+    //     b< s0 2 _fibo_ret     ; if x < 2 return 2
+    //     mv s2 s0        ; s2 = x
+    //     c- s0 s2 1      ; fibo(x-1)
+    //     apc ra 2        ; set return address
+    //     j _fibo         ; call fibo
+    //     mv s1 s0        ; t = fibo(x-1)
+    //     c- s0 s2 2      ; fibo(x-2)
+    //     apc ra 2        ; set return address
+    //     j _fibo         ; call fibo
+    //     c+ s0 s0 s1     ; return fibo(x-1) + fibo(x-2)
+    // _fibo_ret:
+    //     pop ra s1 s2    ; restore context
+    //     j ra            ; return
 
+    // main:
+    //     mv s0 35        ; set x, use s0 as arg and result
+    //     apc ra 2
+    //     j _fibo          ; call fibo fibo(20) should is 6765
+    // ";
+
+    string fibocode = @"
+mv (1) 1
+mv s0 (1)
+";
 
     MyProgram myProgram = new(fibocode)
     {
@@ -57,15 +62,15 @@ static void DeserializeTest()
 static void CompileTest()
 {
     string program = @"
-    a = 1+1 
-    if a==1
-        a = 2+2
-        b = 1
-    endif
-    b = 2
-    if b == 2
-        b=1
-    endif
+    a = 0
+    b = 1
+    c = 2
+    while b <= 100
+        if b & 1
+            a = a + b
+        end
+        b = b + 1
+    end
 ";
     PSCompiler compiler = new();
     var tree = compiler.CompileToAst(program);
@@ -75,9 +80,12 @@ static void CompileTest()
 
     MyProgram myProgram = new(asm);
     myProgram.Run();
+    Console.WriteLine("res: " + myProgram.GetMem(255));
 }
 
 CompileTest();
+// SerializeTest();
+// DeserializeTest();
 
 
 class MyProgram : PSASMContext
@@ -94,4 +102,5 @@ class MyProgram : PSASMContext
     }
 
     public int GetResult(int regid) => rf[regid];
+    public int GetMem(int addr) => ram[addr];
 }
